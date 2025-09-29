@@ -7,7 +7,7 @@ term = Terminal()
 console = Console()
 
 # Game settings
-MAP_WIDTH, MAP_HEIGHT = 30, 20
+MAP_WIDTH, MAP_HEIGHT = 30, 30
 NUM_ZOMBIES = 10
 NUM_LOOT = 8
 
