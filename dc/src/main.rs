@@ -14,11 +14,20 @@ use ratatui::{
     Terminal,
 };
 use std::io;
+use std::collections::HashMap;
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 pub enum TileType {
     Wall,
     Floor,
+}
+
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+pub enum Shade {
+    Dark,    // ? for unknown
+    Dim,     // . faint
+    Lit,     // : lit
+    Bright,  // · bright/full
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -171,6 +180,38 @@ impl Map {
             self.apply_v_tunnel(curr_y, prev_y, curr_x);
         }
     }
+
+    // FOV: Simple raycast from player, blocks on walls, shades by dist
+    pub fn compute_fov(&self, px: i32, py: i32, radius: i32) -> HashMap<(i32, i32), Shade> {
+        let mut visible: HashMap<(i32, i32), Shade> = HashMap::new();
+        for dy in -radius..=radius {
+            for dx in -radius..=radius {
+                if dx * dx + dy * dy > radius * radius { continue; }
+                let tx = px + dx;
+                let ty = py + dy;
+                if !self.in_bounds(tx, ty) { continue; }
+
+                // Basic LOS: Check if path blocked (dummy for now; add Bresenham rays later)
+                let dist = ((dx * dx + dy * dy) as f32).sqrt();  // Euclidean dist
+                let mut blocked = false;
+                if self.tiles[self.xy_idx(tx, ty)] == TileType::Wall {
+                    blocked = true;
+                }  // Expand: Step along line, break on wall
+
+                let shade = if blocked {
+                    Shade::Dark
+                } else if dist > (radius as f32) * 0.7f32 {  // Fix: Cast radius to f32
+                    Shade::Dim
+                } else if dist > (radius as f32) * 0.3f32 {
+                    Shade::Lit
+                } else {
+                    Shade::Bright
+                };
+                visible.insert((tx, ty), shade);
+            }
+        }
+        visible
+    }
 }
 
 fn try_move_player(map: &Map, x: i32, y: i32, dx: i32, dy: i32) -> (i32, i32) {
@@ -211,22 +252,22 @@ fn main() -> Result<()> {
     }
 
     loop {
+        let fov = game_map.compute_fov(player_x, player_y, 12);  // Radius for depth tease
+
         terminal.draw(|f| {
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .margin(2)
                 .constraints([
-                    Constraint::Min(20),  // Map gets most space
-                    Constraint::Max(5),   // Message bar slim
+                    Constraint::Min(20),
+                    Constraint::Max(5),
                 ].as_ref())
-                .split(f.area());  // Fix: f.area() over deprecated f.size()
+                .split(f.area());
 
-            // Dynamic render size from widget
             let map_area = chunks[0];
             let render_w = map_area.width.max(1) as usize;
             let render_h = map_area.height.max(1) as usize;
 
-            // Simple camera: center view on player, radius 10-15 tiles out
             let cam_radius = 10i32;
             let view_x_min = (player_x.saturating_sub(cam_radius)).max(0);
             let view_y_min = (player_y.saturating_sub(cam_radius)).max(0);
@@ -235,19 +276,28 @@ fn main() -> Result<()> {
 
             let mut map_lines = vec![];
             for dy in 0..render_h as i32 {
-                let world_y = view_y_min + dy;
+                let world_y = view_y_min + dy;  // Fix: Declare world_y here
                 let mut line = vec![];
                 for dx in 0..render_w as i32 {
-                    let world_x = view_x_min + dx;
+                    let world_x = view_x_min + dx;  // Fix: Declare world_x here
                     let idx = game_map.xy_idx(world_x, world_y);
-                    let tile = if idx < game_map.tiles.len() { game_map.tiles[idx] } else { TileType::Wall };
+                    let tile = if idx < game_map.tiles.len() { game_map.tiles[idx] } else { TileType::Wall };  // Fix: Declare tile here
+                    let shade = fov.get(&(world_x, world_y)).copied().unwrap_or(Shade::Dark);  // Fix: Use get, == to && logic
+
+                    let (ch, col) = match (tile, shade) {
+                        (TileType::Wall, Shade::Dark) => ('?', Color::DarkGray),
+                        (TileType::Wall, Shade::Dim) => ('#', Color::Gray),
+                        (TileType::Wall, Shade::Lit) => ('#', Color::White),
+                        (TileType::Wall, Shade::Bright) => ('#', Color::Cyan),
+                        (TileType::Floor, Shade::Dark) => (' ', Color::Black),
+                        (TileType::Floor, Shade::Dim) => ('.', Color::DarkGray),
+                        (TileType::Floor, Shade::Lit) => (':', Color::White),
+                        (TileType::Floor, Shade::Bright) => ('·', Color::Yellow),
+                    };
                     let c = if world_x == player_x && world_y == player_y {
                         Span::styled("@", Style::default().fg(Color::Yellow))
                     } else {
-                        match tile {
-                            TileType::Floor => Span::styled(".", Style::default().fg(Color::White)),
-                            TileType::Wall => Span::styled("#", Style::default().fg(Color::Gray)),
-                        }
+                        Span::styled(ch.to_string(), Style::default().fg(col))
                     };
                     line.push(c);
                 }
@@ -263,7 +313,6 @@ fn main() -> Result<()> {
             let map_widget = Paragraph::new(map_lines).block(title);
             f.render_widget(map_widget, chunks[0]);
 
-            // Message bar: Latest flavor text (fix: Vec<String>, as_str() for styled)
             let msg = message_log.last().cloned().unwrap_or_else(|| "No echoes yet...".to_string());
             let mut msg_lines = vec![Line::from(Span::styled(msg.as_str(), 
                 Style::default().fg(Color::Green)))];
@@ -284,7 +333,7 @@ fn main() -> Result<()> {
                     } else {
                         message_log.push("Bump! Solid wall blocks your path.".to_string());
                     }
-                    if message_log.len() > 3 { message_log.remove(0); }  // Rotate log
+                    if message_log.len() > 3 { message_log.remove(0); }
                 }
                 KeyCode::Down | KeyCode::Char('s') => {
                     let (nx, ny) = try_move_player(&game_map, player_x, player_y, 0, 1);
