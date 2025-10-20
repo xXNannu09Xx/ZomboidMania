@@ -8,7 +8,7 @@ use rand::{prelude::ThreadRng, Rng};
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
-    style::{Color, Style},
+    style::{Color, Style, Modifier},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Table, Row, Cell},
     Terminal,
@@ -16,6 +16,14 @@ use ratatui::{
 use std::io;
 use std::collections::HashMap;
 use std::collections::HashSet;
+
+// --- STATE MANAGEMENT ENUM ---
+#[derive(PartialEq, Debug)]
+enum AppMode {
+    Menu,
+    Game,
+    GameOver,
+}
 
 // --- Entity Constants and Structs ---
 const MAX_ZOMBIES: usize = 25;
@@ -26,7 +34,7 @@ const ZOMBIE_SPAWN_RADIUS: i32 = 8;
 struct Zombie {
     x: i32,
     y: i32,
-    hp: i32, // <-- ADDED: Health Points for the zombie
+    hp: i32, 
 }
 
 // --- Enums and Structs ---
@@ -42,7 +50,7 @@ pub enum TileType {
     Building,
     Mall,
     Weapon, 
-    Note, // <--- ADDED: Collectible notes
+    Note, 
 }
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
@@ -111,7 +119,6 @@ impl Map {
     }
 
     pub fn is_walkable(&self, x: i32, y: i32) -> bool {
-        // Walkability check simplified, movement handler checks for entity collision
         self.in_bounds(x, y) && self.tiles[self.xy_idx(x, y)] != TileType::Wall
     }
 
@@ -149,7 +156,6 @@ impl Map {
     }
 
     pub fn generate_bsp(&mut self, rng: &mut ThreadRng) {
-        // FIX: Removed duplicate definition. This is the single, correct version.
         println!("BSP gen firing—target 10-20 rooms");
         let mut rects = vec![Rect::new(1, 1, self.width as i32 - 2, self.height as i32 - 2)];
 
@@ -210,7 +216,7 @@ impl Map {
                 self.apply_h_tunnel(curr_x, prev_x, curr_y);
             }
 
-            // Tunnel Zombie (Guaranteed early encounter)
+            // Tunnel Zombie
             if i == 1 {
                 let (z_x, z_y) = if prev_x != curr_x {
                     ((prev_x + curr_x) / 2, prev_y)
@@ -220,14 +226,13 @@ impl Map {
                 if self.in_bounds(z_x, z_y) {
                     let idx = self.xy_idx(z_x, z_y);
                     if self.tiles[idx] == TileType::Floor {
-                         // Note: We use the TileType::Zombie *only* for the static map display logic.
                          self.tiles[idx] = TileType::Zombie; 
                     }
                 }
             }
         }
         
-        // --- Static Population & Feature Generation (Modified) ---
+        // --- Static Population & Feature Generation ---
         let first_room_rect = self.rooms.first().copied();
 
         for y in 0..self.height as i32 {
@@ -237,13 +242,6 @@ impl Map {
                 if self.tiles[idx] != TileType::Floor {
                     continue;
                 }
-
-                // Determine if this tile is within the safe starting room
-                let is_in_start_room = if let Some(rect) = first_room_rect {
-                    x >= rect.x1 && x <= rect.x2 && y >= rect.y1 && y <= rect.y2
-                } else {
-                    false
-                };
                 
                 // 1. Place FEATURES (Foliage, Car, etc.)
                 if rng.gen_bool(0.08) { 
@@ -266,21 +264,19 @@ impl Map {
             let y = rng.gen_range(1..self.height as i32 - 1);
             let idx = self.xy_idx(x, y);
 
-            // Ensure placement is on an empty floor tile (or inside a feature that isn't Wall/Mall)
             if self.tiles[idx] == TileType::Floor {
                 self.tiles[idx] = TileType::Note;
                 notes_placed += 1;
             }
         }
 
-        // 2. Disable Mall at start (it will be placed when notes_collected reaches 5)
+        // 2. Clear the last room of Mall/other tiles (will be set later)
         if self.rooms.len() > 1 {
             if let Some(last_room) = self.rooms.last() {
                 for y in last_room.y1..=last_room.y2 {
                     for x in last_room.x1..=last_room.x2 {
                         if self.in_bounds(x, y) {
                             let idx = self.xy_idx(x, y);
-                            // Ensure the final room starts as a safe, empty floor or existing features
                             if self.tiles[idx] != TileType::Wall {
                                 self.tiles[idx] = TileType::Floor;
                             }
@@ -289,7 +285,6 @@ impl Map {
                 }
             }
         }
-        // End of generate_bsp
     }
 
     pub fn compute_fov(&self, px: i32, py: i32, radius: i32) -> HashMap<(i32, i32), Shade> {
@@ -333,10 +328,10 @@ struct GameState {
     ammo: i32,   
     inventory: Vec<String>,
     message_log: Vec<String>,
-    zombies: Vec<Zombie>, // ADDED: List of all active zombies
-    move_counter: u32, // <--- ADDED: Counter for managing moodle decay
-    notes_collected: u32, // <--- ADDED: Note collection counter
-    journal: Vec<String>, // <--- NEW: Permanent storage for note content
+    zombies: Vec<Zombie>, 
+    move_counter: u32, 
+    notes_collected: u32, 
+    journal: Vec<String>, 
 }
 
 impl GameState {
@@ -352,19 +347,78 @@ impl GameState {
             inventory: vec!["rusty knife".to_string()],
             message_log: vec![
                 "Radio crackles: 'Help, the horde's at the mall!'".to_string(),
-                "Tip: Press 'T' to throw an item and distract an adjacent zombie.".to_string(), // <--- NEW PROMPT
+                "Tip: Press 'T' to throw an item and distract an adjacent zombie.".to_string(), 
             ],
             zombies: vec![],
-            move_counter: 0, // <--- INITIALIZED
-            notes_collected: 0, // <--- INITIALIZED
-            journal: vec![], // <--- INITIALIZED
+            move_counter: 0, 
+            notes_collected: 0, 
+            journal: vec![], 
         }
     }
 }
 
-// --- Zombie Logic (Adapted) ---
+// --- Core Game Functions ---
 
-// RENAMED and UPDATED for HP-based combat
+fn init_game(rng: &mut ThreadRng) -> (Map, GameState) {
+    let map_width = 160; 
+    let map_height = 47; 
+    let mut game_map = Map::new(map_width, map_height);
+    game_map.generate_bsp(rng);
+
+    let mut state = GameState::new();
+    
+    // Player spawn logic
+    if let Some(first_room) = game_map.rooms.first() {
+        let (px, py) = first_room.center();
+        let mut spawn_x = px;
+        let mut spawn_y = py;
+        
+        for dy in -1..=1 {
+            for dx in -1..=1 {
+                if game_map.in_bounds(px + dx, py + dy) && game_map.tiles[game_map.xy_idx(px + dx, py + dy)] != TileType::Wall {
+                    spawn_x = px + dx;
+                    spawn_y = py + dy;
+                    break;
+                }
+            }
+        }
+        
+        if game_map.in_bounds(spawn_x, spawn_y) {
+            state.player_x = spawn_x;
+            state.player_y = spawn_y;
+            let idx = game_map.xy_idx(spawn_x, spawn_y);
+            game_map.tiles[idx] = TileType::Floor; 
+        } else {
+            state.player_x = 1; 
+            state.player_y = 1;
+        }
+    } else {
+        state.player_x = 1; 
+        state.player_y = 1;
+    }
+
+    // Spawn initial tunnel zombie
+    if game_map.rooms.len() > 1 {
+        let (prev_x, prev_y) = game_map.rooms[0].center();
+        let (curr_x, curr_y) = game_map.rooms[1].center();
+
+        let (z_x, z_y) = if rng.gen_bool(0.5) {
+            if prev_x != curr_x { ((prev_x + curr_x) / 2, prev_y) } else { (prev_x, (prev_y + curr_y) / 2) }
+        } else {
+            if prev_y != curr_y { (prev_x, (prev_y + curr_y) / 2) } else { ((prev_x + curr_x) / 2, curr_y) }
+        };
+
+        if game_map.in_bounds(z_x, z_y) {
+            let idx = game_map.xy_idx(z_x, z_y);
+            if game_map.tiles[idx] == TileType::Zombie {
+                state.zombies.push(Zombie { x: z_x, y: z_y, hp: 10 }); 
+            }
+        }
+    }
+
+    (game_map, state)
+}
+
 fn handle_attack(map: &mut Map, state: &mut GameState, tx: i32, ty: i32, rng: &mut ThreadRng) {
     let zombie_index = state.zombies.iter().position(|z| z.x == tx && z.y == ty);
 
@@ -396,7 +450,6 @@ fn handle_attack(map: &mut Map, state: &mut GameState, tx: i32, ty: i32, rng: &m
     }
 
     // --- Fatigue Modifier ---
-    // Fatigue penalty: Max 20% penalty at 0 Fatigue.
     let fatigue_penalty = (100 - state.fatigue).max(0) as f32 / 100.0 * 0.2;
     let total_hit_chance = (base_hit_chance - fatigue_penalty).max(0.0);
     
@@ -425,14 +478,13 @@ fn handle_attack(map: &mut Map, state: &mut GameState, tx: i32, ty: i32, rng: &m
             weapon_used, total_hit_chance * 100.0));
         
         // --- Zombie Counter-Attack ---
-        state.health = state.health.saturating_sub(1); // ADJUSTED DAMAGE: 1 HP
-        state.message_log.push("Zombie counter-attacks! (-1 Health)".to_string()); // ADJUSTED MESSAGE
+        state.health = state.health.saturating_sub(1); 
+        state.message_log.push("Zombie counter-attacks! (-1 Health)".to_string()); 
     }
     
     while state.message_log.len() > 10 { state.message_log.remove(0); }
 }
 
-// FIX: Corrected function signature to use &Map and &mut GameState
 fn spawn_random_zombies(
     rng: &mut ThreadRng,
     game_map: &Map,
@@ -442,18 +494,15 @@ fn spawn_random_zombies(
         return;
     }
 
-    // Lower spawn probability for fewer zombies
-    if rng.gen_range(0..100) < 10 { // 10% chance per player move
+    if rng.gen_range(0..100) < 10 { 
         let mut attempts = 0;
         while attempts < 10 {
-            // Spawn near player within a radius, not just anywhere
             let x = state.player_x + rng.gen_range(-ZOMBIE_SPAWN_RADIUS..=ZOMBIE_SPAWN_RADIUS);
             let y = state.player_y + rng.gen_range(-ZOMBIE_SPAWN_RADIUS..=ZOMBIE_SPAWN_RADIUS);
 
             if game_map.in_bounds(x, y) && game_map.tiles[game_map.xy_idx(x, y)] == TileType::Floor {
-                // Check if already occupied by a zombie
                 if !state.zombies.iter().any(|z| z.x == x && z.y == y) {
-                    state.zombies.push(Zombie { x, y, hp: 10 }); // Initialize with HP
+                    state.zombies.push(Zombie { x, y, hp: 10 }); 
                     state.message_log.push("You hear distant groaning...".to_string());
                     break;
                 }
@@ -463,46 +512,35 @@ fn spawn_random_zombies(
     }
 }
 
-// NEW FUNCTION: Tactical Retreat
 fn handle_retreat_action(map: &Map, state: &mut GameState, rng: &mut ThreadRng) {
-    // Stat drain for this action is still immediate and higher
     state.fatigue = state.fatigue.saturating_sub(5); 
     state.hunger = state.hunger.saturating_sub(1);
     state.thirst = state.thirst.saturating_sub(1);
 
-    // 1. Find the closest adjacent zombie (Manhattan distance = 1)
     if let Some(closest_zombie_index) = state.zombies.iter().position(|z| {
         (state.player_x - z.x).abs() + (state.player_y - z.y).abs() == 1
     }) {
-        // 2. Check for item to throw
-        // Requires more than just the primary weapon ("rusty knife" or "gun" counts as one item)
         if state.inventory.len() > 1 {
-            // Find an item that is NOT the main weapon to throw
             let non_weapon_index = state.inventory.iter().rposition(|item| item != "rusty knife" && item != "gun");
 
             let thrown_item = if let Some(idx) = non_weapon_index {
                 state.inventory.remove(idx)
             } else {
-                // Fallback: throw the main weapon if nothing else is available (shouldn't happen due to len > 1 check, but safe)
                 state.inventory.pop().unwrap_or("nothing".to_string())
             };
             
             state.message_log.push(format!("You threw your {} to distract the horde!", thrown_item));
 
-            // 3. Remove the zombie
             let zombie = state.zombies.remove(closest_zombie_index);
             state.message_log.push(format!("Retreat successful! Zombie dispatched by distraction."));
 
-            // 4. Calculate escape direction
             let dx = (state.player_x - zombie.x).signum();
             let dy = (state.player_y - zombie.y).signum();
             
-            // Prioritize diagonal retreat if possible, otherwise move directly away
             let escape_targets = [(state.player_x + dx, state.player_y + dy), (state.player_x + dx, state.player_y), (state.player_x, state.player_y + dy)];
             
             let mut escaped = false;
             for (nx, ny) in escape_targets.iter() {
-                // Check map bounds, walkability, and collision with other zombies
                 if map.is_walkable(*nx, *ny) && !state.zombies.iter().any(|z| z.x == *nx && z.y == *ny) {
                     state.player_x = *nx;
                     state.player_y = *ny;
@@ -513,7 +551,6 @@ fn handle_retreat_action(map: &Map, state: &mut GameState, rng: &mut ThreadRng) 
             }
 
             if !escaped {
-                 // Player couldn't move, but the distraction is still effective.
                  state.message_log.push("You couldn't move, but the distraction bought time.".to_string());
             }
             
@@ -526,13 +563,10 @@ fn handle_retreat_action(map: &Map, state: &mut GameState, rng: &mut ThreadRng) 
     while state.message_log.len() > 10 { state.message_log.remove(0); }
 }
 
-
-// FIX: Corrected function signature to use &Map and &mut GameState
 fn update_zombies(
     map: &Map,
     state: &mut GameState,
 ) {
-    // FIX: Create an immutable HashSet of ALL CURRENT zombie locations
     let occupied_positions: HashSet<(i32, i32)> = state.zombies.iter().map(|z| (z.x, z.y)).collect();
 
     for zombie in state.zombies.iter_mut() {
@@ -545,13 +579,11 @@ fn update_zombies(
         let dist = (state.player_x - zx).abs() + (state.player_y - zy).abs();
 
         if dist == 1 {
-            // Already adjacent, attack and skip movement
-            state.health = state.health.saturating_sub(1); // ADJUSTED DAMAGE: 1 HP
-            state.message_log.push("A zombie bites you! (-1 HP)".to_string()); // ADJUSTED MESSAGE
+            state.health = state.health.saturating_sub(1); 
+            state.message_log.push("A zombie bites you! (-1 HP)".to_string()); 
             continue; 
-        } else if dist > 1 && dist <= 12 { // Move only if in FOV radius (12)
+        } else if dist > 1 && dist <= 12 { 
             
-            // Try positions in a fixed order: X-move then Y-move
             let try_positions = [(zx + dx, zy), (zx, zy + dy)];
 
             let mut moved = false;
@@ -563,25 +595,21 @@ fn update_zombies(
                 let target_tile = map.tiles[map.xy_idx(nx, ny)];
                 let is_walkable_tile = target_tile != TileType::Wall;
                 
-                // Check if the target is the player OR if it's already occupied by a zombie.
                 let is_occupied_by_another_zombie = occupied_positions.contains(&(nx, ny)) && (nx != zx || ny != zy); 
                 
                 if is_walkable_tile && !is_occupied_by_another_zombie {
-                    // Update zombie position
                     zombie.x = nx;
                     zombie.y = ny;
                     moved = true;
                     break;
                 }
             }
-
         }
     }
     
     while state.message_log.len() > 10 { state.message_log.remove(0); }
 }
 
-// NEW FUNCTION: Note Content
 fn get_note_content(note_id: u32) -> &'static str {
     match note_id {
         1 => "Note 1: 'They followed the sirens. The radio tower signal is strongest near the old shopping center. That's the only way out.'",
@@ -592,8 +620,6 @@ fn get_note_content(note_id: u32) -> &'static str {
         _ => "A blank piece of paper. Nothing here.",
     }
 }
-
-// --- Interaction Handlers ---
 
 fn is_near_building(map: &Map, px: i32, py: i32) -> bool {
     for dy in -1..=1 {
@@ -618,7 +644,7 @@ fn rest_in_building(state: &mut GameState) {
         return;
     }
 
-    state.fatigue = state.fatigue.saturating_add(50).min(100); 
+    state.fatigue = state.fatigue.saturating_add(50).min(300); 
     state.health = state.health.saturating_add(10).min(100);
     state.hunger = state.hunger.saturating_sub(hunger_cost); 
     state.thirst = state.thirst.saturating_sub(thirst_cost);
@@ -628,18 +654,15 @@ fn rest_in_building(state: &mut GameState) {
     while state.message_log.len() > 10 { state.message_log.remove(0); }
 }
 
-
-// FIXED: Ensures combat is turn-ending without player movement, regardless of outcome.
 fn handle_tile_interaction(map: &mut Map, state: &mut GameState, x: i32, y: i32, rng: &mut ThreadRng) {
     if !map.in_bounds(x, y) {
         state.message_log.push("Bump! You hit the edge of the world.".to_string());
         return;
     }
 
-    // 1. Check for Zombie Combat (Turn-ending, no player movement)
     if state.zombies.iter().any(|z| z.x == x && z.y == y) {
         handle_attack(map, state, x, y, rng); 
-        return; // Combat is turn-ending, player stays put.
+        return; 
     }
 
     let idx = map.xy_idx(x, y);
@@ -715,31 +738,25 @@ fn handle_tile_interaction(map: &mut Map, state: &mut GameState, x: i32, y: i32,
             map.tiles[idx] = TileType::Floor;
             moved = true;
         }
-        TileType::Note => { // <--- NEW INTERACTION LOGIC
-            // Only collect up to 5 notes
+        TileType::Note => { 
             if state.notes_collected < 5 {
                 state.notes_collected = state.notes_collected.saturating_add(1);
             }
             let note_id = state.notes_collected; 
             let content = get_note_content(note_id);
             
-            // Add note content to the permanent Journal
             state.journal.push(content.to_string());
 
-            // Add simple discovery alert to the transient message log
             state.message_log.push(format!("(J) Found Note #{}: {}/5 collected.", note_id, state.notes_collected));
             
-            // Critical: Check for endgame condition
             if state.notes_collected == 5 {
                 state.message_log.push(">>> RESCUE SIGNAL SECURED! The Mall is now the objective. <<<".to_string());
                 
-                // Immediately spawn the Mall location in the last room
                 if let Some(last_room) = map.rooms.last() {
                     for y in last_room.y1..=last_room.y2 {
                         for x in last_room.x1..=last_room.x2 {
                             if map.in_bounds(x, y) {
                                 let mall_idx = map.xy_idx(x, y);
-                                // Convert floor/feature tiles to Mall
                                 if map.tiles[mall_idx] != TileType::Wall {
                                     map.tiles[mall_idx] = TileType::Mall;
                                 }
@@ -755,6 +772,8 @@ fn handle_tile_interaction(map: &mut Map, state: &mut GameState, x: i32, y: i32,
         TileType::Mall => {
             state.message_log.push("You reached the Mall! The final challenge awaits...".to_string());
             moved = true;
+            // WIN CONDITION! Switch to Game Over/Win screen
+            state.health = 0; // Temporary trick to trigger the game end break
         }
         TileType::Floor => {
             moved = true; 
@@ -768,10 +787,345 @@ fn handle_tile_interaction(map: &mut Map, state: &mut GameState, x: i32, y: i32,
         state.player_x = x;
         state.player_y = y;
         state.fatigue = state.fatigue.saturating_sub(1);
-        state.move_counter += 1; // <--- INCREMENT MOVE COUNTER
+        state.move_counter += 1; 
     }
     
     while state.message_log.len() > 10 { state.message_log.remove(0); }
+}
+
+// --- Rendering Functions ---
+
+fn draw_menu(f: &mut ratatui::Frame, ) {
+    let size = f.size();
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(Span::styled(" BRAIIIIINNNNSSS!!!!!!! ", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)));
+    f.render_widget(block, size);
+
+    let menu_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage(30), // Top padding
+            Constraint::Length(1),      // Title line 1
+            Constraint::Length(1),      // Title line 2
+            Constraint::Length(1),      // Title line 3
+            Constraint::Percentage(20), // Middle padding
+            Constraint::Length(1),      // Options line
+            Constraint::Percentage(30), // Bottom padding
+        ].as_ref())
+        .split(size);
+
+    let title_style = Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD);
+    let option_style = Style::default().fg(Color::Cyan);
+
+    let title_line1 = Line::from(Span::styled(
+        "    _______  _______  _______    ",
+        title_style
+    ));
+    let title_line2 = Line::from(Span::styled(
+        "   | Z O M B O I D | M A N I A |",
+        title_style
+    ));
+    let title_line3 = Line::from(Span::styled(
+        "    -------  -------  -------    ",
+        title_style
+    ));
+
+    let options_line = Line::from(vec![
+        Span::styled("Press ", option_style),
+        Span::styled("ENTER", option_style.add_modifier(Modifier::BOLD | Modifier::REVERSED)),
+        Span::styled(" to START", option_style),
+        Span::styled(" | Press ", option_style),
+        Span::styled("ESC", option_style.add_modifier(Modifier::BOLD | Modifier::REVERSED)),
+        Span::styled(" to QUIT", option_style),
+    ]);
+
+    f.render_widget(Paragraph::new(title_line1).alignment(ratatui::layout::Alignment::Center), menu_chunks[1]);
+    f.render_widget(Paragraph::new(title_line2).alignment(ratatui::layout::Alignment::Center), menu_chunks[2]);
+    f.render_widget(Paragraph::new(title_line3).alignment(ratatui::layout::Alignment::Center), menu_chunks[3]);
+    f.render_widget(Paragraph::new(options_line).alignment(ratatui::layout::Alignment::Center), menu_chunks[5]);
+}
+
+fn draw_game(f: &mut ratatui::Frame, game_map: &Map, state: &GameState) {
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .margin(1)
+        .constraints([
+            Constraint::Percentage(80), 
+            Constraint::Percentage(20), 
+        ].as_ref())
+        .split(f.size());
+
+    let hud_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .margin(0)
+        .constraints([
+            Constraint::Percentage(30), 
+            Constraint::Percentage(20), 
+            Constraint::Percentage(25), 
+            Constraint::Percentage(25), 
+        ].as_ref())
+        .split(chunks[1]);
+
+    // --- Main Map Rendering ---
+    let map_area = chunks[0];
+    let render_w = map_area.width as i32;
+    let render_h = map_area.height as i32;
+
+    let map_w_i32 = game_map.width as i32;
+    let map_h_i32 = game_map.height as i32;
+    
+    let mut view_x_min = state.player_x.saturating_sub(render_w / 2);
+    let mut view_y_min = state.player_y.saturating_sub(render_h / 2);
+    
+    if view_x_min + render_w >= map_w_i32 { view_x_min = map_w_i32 - render_w; }
+    if view_y_min + render_h >= map_h_i32 { view_y_min = map_h_i32 - render_h; }
+    
+    view_x_min = view_x_min.max(0);
+    view_y_min = view_y_min.max(0);
+    
+    let view_x_max = view_x_min + render_w;
+    let view_y_max = view_y_min + render_h;
+    
+    let fov = game_map.compute_fov(state.player_x, state.player_y, 12);
+    let zombie_locations: HashMap<(i32, i32), i32> = state.zombies.iter().map(|z| ((z.x, z.y), z.hp)).collect();
+
+    let mut map_lines = vec![];
+    for world_y in view_y_min..view_y_max {
+        let mut line = vec![];
+        for world_x in view_x_min..view_x_max {
+
+            if !game_map.in_bounds(world_x, world_y) {
+                line.push(Span::styled(" ", Style::default().fg(Color::Black)));
+                continue;
+            }
+
+            let tile_pos = (world_x, world_y);
+            let idx = game_map.xy_idx(world_x, world_y);
+            let tile = game_map.tiles[idx];
+            let shade = fov.get(&tile_pos).copied().unwrap_or(Shade::Dark);
+
+            let c = if world_x == state.player_x && world_y == state.player_y {
+                Span::styled("@", Style::default().fg(Color::Yellow))
+            } else if zombie_locations.contains_key(&tile_pos) {
+                let col = match shade {
+                    Shade::Dark => Color::Rgb(139, 0, 0),
+                    Shade::Dim => Color::Rgb(200, 0, 0),
+                    Shade::Lit => Color::Red,
+                    Shade::Bright => Color::LightRed,
+                };
+                Span::styled("Z", Style::default().fg(col))
+            } else {
+                let (ch, col) = match (tile, shade) {
+                    (TileType::Wall, Shade::Dark) => ('▓', Color::DarkGray),
+                    (TileType::Wall, Shade::Dim) => ('▒', Color::Gray),
+                    (TileType::Wall, Shade::Lit) => ('#', Color::White),
+                    (TileType::Wall, Shade::Bright) => ('#', Color::Cyan),
+                    
+                    (TileType::Floor, Shade::Dark) => (' ', Color::Black),
+                    (TileType::Floor, Shade::Dim) => ('░', Color::DarkGray),
+                    (TileType::Floor, Shade::Lit) => ('.', Color::White),
+                    (TileType::Floor, Shade::Bright) => ('·', Color::Yellow),
+                    
+                    (TileType::Foliage, Shade::Dark) => (' ', Color::Black),
+                    (TileType::Foliage, Shade::Dim) => ('~', Color::Green),
+                    (TileType::Foliage, Shade::Lit) => ('"', Color::LightGreen),
+                    (TileType::Foliage, Shade::Bright) => (',', Color::LightGreen),
+                    
+                    (TileType::Car, Shade::Dark) => (' ', Color::Black),
+                    (TileType::Car, Shade::Dim) => ('C', Color::DarkGray),
+                    (TileType::Car, Shade::Lit) => ('C', Color::Gray),
+                    (TileType::Car, Shade::Bright) => ('C', Color::White),
+                    
+                    (TileType::Resource, Shade::Dark) => (' ', Color::Black),
+                    (TileType::Resource, Shade::Dim) => ('$', Color::Yellow),
+                    (TileType::Resource, Shade::Lit) => ('$', Color::LightYellow),
+                    (TileType::Resource, Shade::Bright) => ('$', Color::LightYellow),
+                    
+                    (TileType::Building, Shade::Dark) => (' ', Color::Black),
+                    (TileType::Building, Shade::Dim) => ('B', Color::Blue),
+                    (TileType::Building, Shade::Lit) => ('B', Color::Blue),
+                    (TileType::Building, Shade::Bright) => ('B', Color::LightBlue),
+                    
+                    (TileType::Mall, Shade::Dark) => ('?', Color::Magenta),
+                    (TileType::Mall, Shade::Dim) => ('M', Color::LightMagenta),
+                    (TileType::Mall, Shade::Lit) => ('M', Color::LightMagenta),
+                    (TileType::Mall, Shade::Bright) => ('M', Color::LightMagenta),
+
+                    (TileType::Weapon, Shade::Dark) => ('?', Color::Red),
+                    (TileType::Weapon, Shade::Dim) => ('W', Color::Red),
+                    (TileType::Weapon, Shade::Lit) => ('W', Color::Red),
+                    (TileType::Weapon, Shade::Bright) => ('W', Color::LightRed),
+                    
+                    (TileType::Note, Shade::Dark) => (' ', Color::Black),
+                    (TileType::Note, Shade::Dim) => ('!', Color::Yellow),
+                    (TileType::Note, Shade::Lit) => ('!', Color::LightYellow),
+                    (TileType::Note, Shade::Bright) => ('!', Color::White),
+                    
+                    (TileType::Zombie, _) => ('Z', Color::Black), 
+                };
+                Span::styled(ch.to_string(), Style::default().fg(col))
+            };
+            line.push(c);
+        }
+        map_lines.push(Line::from(line));
+    }
+
+    let title = Block::default().borders(Borders::ALL).title(format!("{} Rooms | WASD/Arrows | R: Rest | T: Retreat | ESC Quit | @ World({},{})", 
+        game_map.rooms.len(), state.player_x, state.player_y));
+    let map_widget = Paragraph::new(map_lines).block(title);
+    f.render_widget(map_widget, chunks[0]);
+
+    // --- Mini-map ---
+    let mini_w: i32 = 30; 
+    let mini_h: i32 = 15; 
+    let center_offset = mini_w / 2;
+    
+    let mut mini_lines = vec![];
+    for my in 0..mini_h {
+        let mut mini_line = vec![];
+        for mx in 0..mini_w {
+            let m_x = state.player_x + (mx - center_offset);
+            let m_y = state.player_y + (my - (mini_h / 2)); 
+            
+            let m_ch = if m_x == state.player_x && m_y == state.player_y {
+                Span::styled("@", Color::Yellow)
+            } else if zombie_locations.contains_key(&(m_x, m_y)) {
+                Span::styled("Z", Color::Red)
+            } else if game_map.in_bounds(m_x, m_y) {
+                let m_tile = game_map.tiles[game_map.xy_idx(m_x, m_y)];
+                match m_tile {
+                    TileType::Wall => Span::styled("#", Color::Gray),
+                    TileType::Floor | TileType::Zombie => Span::styled(".", Color::White), 
+                    TileType::Foliage => Span::styled("~", Color::Green),
+                    TileType::Car => Span::styled("C", Color::DarkGray),
+                    TileType::Resource => Span::styled("$", Color::Yellow),
+                    TileType::Building => Span::styled("B", Color::Blue),
+                    TileType::Mall => Span::styled("M", Color::LightMagenta),
+                    TileType::Weapon => Span::styled("W", Color::Red),
+                    TileType::Note => Span::styled("!", Color::Yellow),
+                }
+            } else {
+                Span::styled(" ", Color::Black)
+            };
+            mini_line.push(m_ch);
+        }
+        mini_lines.push(Line::from(mini_line));
+    }
+    let mini_widget = Paragraph::new(mini_lines).block(Block::default().borders(Borders::ALL).title("Mini-Map (Local)"));
+    f.render_widget(mini_widget, hud_chunks[0]); 
+
+    // --- Backpack ---
+    let backpack_items: Vec<Row> = state.inventory.iter().map(|item| {
+        Row::new(vec![Cell::from(Span::styled(item, Style::default().fg(Color::Green)))])
+    }).collect();
+    let backpack_table = Table::new(backpack_items, &[Constraint::Percentage(100)]).block(Block::default().borders(Borders::ALL).title(format!("Backpack ({} Ammo)", state.ammo)));
+    f.render_widget(backpack_table, hud_chunks[1]);
+
+    // --- Moodles ---
+    let moodle_lines = vec![
+        Line::from(vec![
+            Span::styled("HP:", Color::Red),
+            Span::styled(format!("{:3}", state.health.max(0)), Style::default().fg(if state.health < 25 { Color::Red } else if state.health < 75 { Color::Yellow } else { Color::Green })),
+        ]),
+        Line::from(vec![
+            Span::styled("Hunger:", Color::White),
+            Span::styled(format!("{:3}", state.hunger.max(0)), Style::default().fg(if state.hunger < 25 { Color::Red } else if state.hunger < 75 { Color::Yellow } else { Color::Green })),
+        ]),
+        Line::from(vec![
+            Span::styled("Thirst:", Color::White),
+            Span::styled(format!("{:3}", state.thirst.max(0)), Style::default().fg(if state.thirst < 25 { Color::Red } else if state.thirst < 75 { Color::Yellow } else { Color::Green })),
+        ]),
+        Line::from(vec![
+            Span::styled("Fatigue:", Color::White),
+            Span::styled(format!("{:3}", state.fatigue.max(0)), Style::default().fg(if state.fatigue < 25 { Color::Red } else if state.fatigue < 77 { Color::Yellow } else { Color::Green })),
+        ]),
+    ];
+    let moodle_widget = Paragraph::new(moodle_lines).block(Block::default().borders(Borders::ALL).title("Moodles"));
+    f.render_widget(moodle_widget, hud_chunks[2]);
+
+    // --- Dialogues/Journal ---
+    let log_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage(70), 
+            Constraint::Percentage(30), 
+        ].as_ref())
+        .split(hud_chunks[3]);
+
+    // JOURNAL 
+    let journal_lines: Vec<Line<'_>> = state.journal
+        .iter()
+        .map(|msg| {
+            Line::from(Span::styled(msg.as_str(), Color::LightGreen))
+        })
+        .collect();
+    
+    let journal_widget = Paragraph::new(journal_lines)
+        .wrap(ratatui::widgets::Wrap { trim: false }) 
+        .block(Block::default().borders(Borders::ALL).title(format!("Journal ({}/5)", state.notes_collected)));
+    
+    f.render_widget(journal_widget, log_chunks[0]);
+
+    // DIALOGUES 
+    let max_lines = log_chunks[1].height as usize - 2; 
+    let msg_lines: Vec<Line<'_>> = state.message_log
+        .iter()
+        .rev()
+        .take(max_lines)
+        .map(|msg| Line::from(Span::styled(msg.as_str(), Color::Cyan)))
+        .collect();
+    let mut final_lines = msg_lines.into_iter().rev().collect::<Vec<_>>();
+
+    while final_lines.len() < max_lines {
+        final_lines.insert(0, Line::from(""));
+    }
+
+    let dialogue_widget = Paragraph::new(final_lines).block(Block::default().borders(Borders::ALL).title("Radio/Log"));
+    f.render_widget(dialogue_widget, log_chunks[1]);
+}
+
+fn draw_game_over(f: &mut ratatui::Frame, win: bool) {
+    let size = f.size();
+    let title_style = if win { Style::default().fg(Color::Green).add_modifier(Modifier::BOLD) } 
+                      else { Style::default().fg(Color::Red).add_modifier(Modifier::BOLD) };
+    
+    let message = if win {
+        "YOU ESCAPED! Rescue chopper is here. Project Complete!"
+    } else {
+        "GAME OVER. You succumbed to the elements or the horde."
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(Span::styled(" PROJECT ENDED ", title_style));
+    f.render_widget(block, size);
+
+    let content_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage(40),
+            Constraint::Length(1), 
+            Constraint::Length(3), 
+        ].as_ref())
+        .split(size);
+
+    let message_widget = Paragraph::new(message)
+        .style(title_style)
+        .alignment(ratatui::layout::Alignment::Center);
+
+    let prompt_widget = Paragraph::new(
+        Line::from(vec![
+            Span::styled("Press ", Style::default().fg(Color::Cyan)),
+            Span::styled("ENTER", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD | Modifier::REVERSED)),
+            Span::styled(" for Main Menu, or ", Style::default().fg(Color::Cyan)),
+            Span::styled("ESC", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD | Modifier::REVERSED)),
+            Span::styled(" to Quit.", Style::default().fg(Color::Cyan)),
+        ])
+    ).alignment(ratatui::layout::Alignment::Center);
+
+    f.render_widget(message_widget, content_chunks[1]);
+    f.render_widget(prompt_widget, content_chunks[2]);
 }
 
 // --- Main function ---
@@ -786,443 +1140,147 @@ fn main() -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let mut rng = rand::thread_rng();
-    let map_width = 160; // FIX: Increased map width
-    let map_height = 47;  // FIX: Increased map height
-    let mut game_map = Map::new(map_width, map_height);
-    game_map.generate_bsp(&mut rng);
-
+    let mut current_mode = AppMode::Menu;
+    let mut game_map = Map::new(160, 47); // Initial empty map
     let mut state = GameState::new();
+    let mut win_condition_met = false;
     
-    // Player spawn logic
-    if let Some(first_room) = game_map.rooms.first() {
-        let (px, py) = first_room.center();
-        let mut spawn_x = px;
-        let mut spawn_y = py;
-        
-        for dy in -1..=1 {
-            for dx in -1..=1 {
-                if game_map.in_bounds(px + dx, py + dy) && game_map.tiles[game_map.xy_idx(px + dx, py + dy)] != TileType::Wall {
-                    spawn_x = px + dx;
-                    spawn_y = py + dy;
-                    break;
-                }
-            }
-        }
-        
-        if game_map.in_bounds(spawn_x, spawn_y) {
-            state.player_x = spawn_x;
-            state.player_y = spawn_y;
-            let idx = game_map.xy_idx(spawn_x, spawn_y);
-            // Ensure player spawn tile is Floor
-            game_map.tiles[idx] = TileType::Floor; 
-        } else {
-            state.player_x = 1; 
-            state.player_y = 1;
-        }
-    } else {
-        state.player_x = 1; 
-        state.player_y = 1;
-    }
+    // Initial map and state generation when switching from Menu to Game
+    // We don't generate the first map here, but inside the loop once 'Game' mode starts.
 
-    // Spawn an initial zombie from the tunnel logic if it was set
-    if game_map.rooms.len() > 1 {
-        let (prev_x, prev_y) = game_map.rooms[0].center();
-        let (curr_x, curr_y) = game_map.rooms[1].center();
-
-        let (z_x, z_y) = if rng.gen_bool(0.5) {
-            // H-tunnel position (if H-tunnel was built first)
-            if prev_x != curr_x { ((prev_x + curr_x) / 2, prev_y) } else { (prev_x, (prev_y + curr_y) / 2) }
-        } else {
-            // V-tunnel position (if V-tunnel was built first)
-            if prev_y != curr_y { (prev_x, (prev_y + curr_y) / 2) } else { ((prev_x + curr_x) / 2, curr_y) }
-        };
-
-        if game_map.in_bounds(z_x, z_y) {
-            let idx = game_map.xy_idx(z_x, z_y);
-            // Only add the zombie to the GameState if the tile type was set during map gen
-            if game_map.tiles[idx] == TileType::Zombie {
-                state.zombies.push(Zombie { x: z_x, y: z_y, hp: 10 }); // <-- INITIALIZE HP
-            }
-        }
-    }
 
     loop {
-        let mut turn_taken = false;
-        
-        // === INPUT HANDLING ===
+        // --- RENDERING ---
+        terminal.draw(|f| {
+            match current_mode {
+                AppMode::Menu => draw_menu(f),
+                AppMode::Game => draw_game(f, &game_map, &state),
+                AppMode::GameOver => draw_game_over(f, win_condition_met),
+            }
+        })?;
+
+        // --- INPUT HANDLING ---
         if event::poll(std::time::Duration::from_millis(150))? {
             if let Event::Key(key) = event::read()? {
                 
-                if key.code == KeyCode::Esc {
-                    break;
-                }
-                
-                // --- Action Keys ---
-                let mut action_taken = false;
-                
-                // Check for the REST action
-                if key.code == KeyCode::Char('r') {
-                    if is_near_building(&game_map, state.player_x, state.player_y) {
-                        rest_in_building(&mut state);
-                        action_taken = true;
-                    } else {
-                        state.message_log.push("You can only rest inside or near a Building ('B').".to_string());
-                    }
-                } 
-                // NEW: Check for the RETREAT action
-                else if key.code == KeyCode::Char('t') {
-                    handle_retreat_action(&game_map, &mut state, &mut rng);
-                    action_taken = true;
-                    state.move_counter += 1; // Retreat counts as a move for decay purposes
-                }
-                // ADDED: J key does nothing but consume the turn
-                else if key.code == KeyCode::Char('j') { 
-                    state.message_log.push("The journal is already visible in the bottom-right panel.".to_string());
-                    action_taken = true;
-                }
-
-                // Movement/Interaction logic
-                let (target_x, target_y) = match key.code {
-                    KeyCode::Up | KeyCode::Char('w') => (state.player_x, state.player_y - 1),
-                    KeyCode::Down | KeyCode::Char('s') => (state.player_x, state.player_y + 1),
-                    KeyCode::Left | KeyCode::Char('a') => (state.player_x - 1, state.player_y),
-                    KeyCode::Right | KeyCode::Char('d') => (state.player_x + 1, state.player_y),
-                    _ => {
-                        if !action_taken { continue; } 
-                        else { (state.player_x, state.player_y) }
-                    }
-                };
-
-                if !action_taken {
-                    let old_x = state.player_x;
-                    let old_y = state.player_y;
+                match current_mode {
                     
-                    handle_tile_interaction(&mut game_map, &mut state, target_x, target_y, &mut rng);
-                    
-                    // Check if a move or turn-consuming interaction occurred.
-                    turn_taken = (state.player_x != old_x || state.player_y != old_y) || 
-                                 (target_x == old_x && target_y == old_y && 
-                                  state.zombies.iter().any(|z| z.x == target_x && z.y == target_y));
-                } else {
-                    turn_taken = action_taken;
-                }
-            }
-        }
-        
-        // If the player took any action (move, interact, rest, or retreat)
-        if turn_taken {
-            // === ZOMBIE TURN START ===
-            spawn_random_zombies(&mut rng, &game_map, &mut state);
-            update_zombies(&game_map, &mut state);
-            // === ZOMBIE TURN END ===
-
-            // Game turn logic (passive state decay based on counters)
-            
-            // Fatigue decay: every 5 moves (ADJUSTED)
-            if state.move_counter % 5 == 0 { 
-                if state.fatigue > 0 { state.fatigue -= 1; }
-            }
-            
-            // Thirst decay: every 5 moves (REMAINS THE SAME)
-            if state.move_counter % 5 == 0 {
-                if state.thirst > 0 { state.thirst -= 1; }
-            }
-            
-            // Hunger decay: every 10 moves (REMAINS THE SAME)
-            if state.move_counter % 10 == 0 {
-                if state.hunger > 0 { state.hunger -= 1; }
-            }
-            
-            // Check for negative stats and apply damage/game over logic
-            if state.hunger <= 0 || state.thirst <= 0 || state.fatigue <= 0 {
-                 if state.hunger <= 0 { state.health = state.health.saturating_sub(1); }
-                 if state.thirst <= 0 { state.health = state.health.saturating_sub(1); }
-                 if state.fatigue <= 0 { state.health = state.health.saturating_sub(1); }
-
-                 if state.health <= 0 {
-                     state.message_log.push("You succumbed to the elements.".to_string());
-                     break;
-                 }
-            }
-        }
-
-
-        let fov = game_map.compute_fov(state.player_x, state.player_y, 12);
-
-        terminal.draw(|f| {
-            let chunks = Layout::default()
-                .direction(Direction::Horizontal)
-                .margin(1)
-                .constraints([
-                    Constraint::Percentage(80), // Map area
-                    Constraint::Percentage(20), // HUD area
-                ].as_ref())
-                .split(f.area());
-
-            // Define hud_chunks here before it's used
-            let hud_chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .margin(0)
-                .constraints([
-                    Constraint::Percentage(30), // Minimap (expanded)
-                    Constraint::Percentage(20), // Backpack
-                    Constraint::Percentage(25), // Moodles
-                    Constraint::Percentage(25), // Dialogues/Journal (bottom area)
-                ].as_ref())
-                .split(chunks[1]);
-
-            let map_area = chunks[0];
-            let render_w = map_area.width as i32;
-            let render_h = map_area.height as i32;
-
-            let map_w_i32 = game_map.width as i32;
-            let map_h_i32 = game_map.height as i32;
-            
-            let mut view_x_min = state.player_x.saturating_sub(render_w / 2);
-            let mut view_y_min = state.player_y.saturating_sub(render_h / 2);
-            
-            if view_x_min + render_w >= map_w_i32 {
-                 view_x_min = map_w_i32 - render_w;
-            }
-            if view_y_min + render_h >= map_h_i32 {
-                 view_y_min = map_h_i32 - render_h;
-            }
-            
-            view_x_min = view_x_min.max(0);
-            view_y_min = view_y_min.max(0);
-            
-            let view_x_max = view_x_min + render_w;
-            let view_y_max = view_y_min + render_h;
-            
-            // Collect zombie locations for efficient drawing
-            let zombie_locations: HashMap<(i32, i32), i32> = state.zombies.iter().map(|z| ((z.x, z.y), z.hp)).collect();
-
-
-            let mut map_lines = vec![];
-            for world_y in view_y_min..view_y_max {
-                let mut line = vec![];
-                for world_x in view_x_min..view_x_max {
-
-                    if !game_map.in_bounds(world_x, world_y) {
-                        line.push(Span::styled(" ", Style::default().fg(Color::Black)));
-                        continue;
-                    }
-
-                    let tile_pos = (world_x, world_y);
-                    let idx = game_map.xy_idx(world_x, world_y);
-                    let tile = game_map.tiles[idx];
-                    let shade = fov.get(&tile_pos).copied().unwrap_or(Shade::Dark);
-
-                    let c = if world_x == state.player_x && world_y == state.player_y {
-                        Span::styled("@", Style::default().fg(Color::Yellow))
-                    } else if zombie_locations.contains_key(&tile_pos) {
-                        // Draw moving zombie (color based on shade)
-                        let col = match shade {
-                            Shade::Dark => Color::Rgb(139, 0, 0),
-                            Shade::Dim => Color::Rgb(200, 0, 0),
-                            Shade::Lit => Color::Red,
-                            Shade::Bright => Color::LightRed,
-                        };
-                        Span::styled("Z", Style::default().fg(col))
-                    } else {
-                        // Draw static tile
-                        let (ch, col) = match (tile, shade) {
-                            (TileType::Wall, Shade::Dark) => ('▓', Color::DarkGray),
-                            (TileType::Wall, Shade::Dim) => ('▒', Color::Gray),
-                            (TileType::Wall, Shade::Lit) => ('#', Color::White),
-                            (TileType::Wall, Shade::Bright) => ('#', Color::Cyan),
-                            
-                            (TileType::Floor, Shade::Dark) => (' ', Color::Black),
-                            (TileType::Floor, Shade::Dim) => ('░', Color::DarkGray),
-                            (TileType::Floor, Shade::Lit) => ('.', Color::White),
-                            (TileType::Floor, Shade::Bright) => ('·', Color::Yellow),
-                            
-                            (TileType::Foliage, Shade::Dark) => (' ', Color::Black),
-                            (TileType::Foliage, Shade::Dim) => ('~', Color::Green),
-                            (TileType::Foliage, Shade::Lit) => ('"', Color::LightGreen),
-                            (TileType::Foliage, Shade::Bright) => (',', Color::LightGreen),
-                            
-                            (TileType::Car, Shade::Dark) => (' ', Color::Black),
-                            (TileType::Car, Shade::Dim) => ('C', Color::DarkGray),
-                            (TileType::Car, Shade::Lit) => ('C', Color::Gray),
-                            (TileType::Car, Shade::Bright) => ('C', Color::White),
-                            
-                            (TileType::Resource, Shade::Dark) => (' ', Color::Black),
-                            (TileType::Resource, Shade::Dim) => ('$', Color::Yellow),
-                            (TileType::Resource, Shade::Lit) => ('$', Color::LightYellow),
-                            (TileType::Resource, Shade::Bright) => ('$', Color::LightYellow),
-                            
-                            (TileType::Building, Shade::Dark) => (' ', Color::Black),
-                            (TileType::Building, Shade::Dim) => ('B', Color::Blue),
-                            (TileType::Building, Shade::Lit) => ('B', Color::Blue),
-                            (TileType::Building, Shade::Bright) => ('B', Color::LightBlue),
-                            
-                            (TileType::Mall, Shade::Dark) => ('?', Color::Magenta),
-                            (TileType::Mall, Shade::Dim) => ('M', Color::LightMagenta),
-                            (TileType::Mall, Shade::Lit) => ('M', Color::LightMagenta),
-                            (TileType::Mall, Shade::Bright) => ('M', Color::LightMagenta),
-
-                            (TileType::Weapon, Shade::Dark) => ('?', Color::Red),
-                            (TileType::Weapon, Shade::Dim) => ('W', Color::Red),
-                            (TileType::Weapon, Shade::Lit) => ('W', Color::Red),
-                            (TileType::Weapon, Shade::Bright) => ('W', Color::LightRed),
-                            
-                            (TileType::Note, Shade::Dark) => (' ', Color::Black),
-                            (TileType::Note, Shade::Dim) => ('!', Color::Yellow),
-                            (TileType::Note, Shade::Lit) => ('!', Color::LightYellow),
-                            (TileType::Note, Shade::Bright) => ('!', Color::White),
-                            
-                            (TileType::Zombie, _) => ('Z', Color::Black), // Static zombie tile is now drawn as a placeholder
-                        };
-                        Span::styled(ch.to_string(), Style::default().fg(col))
-                    };
-                    line.push(c);
-                }
-                map_lines.push(Line::from(line));
-            }
-
-            let title = if game_map.rooms.is_empty() {
-                Block::default().borders(Borders::ALL).title(Span::styled("Gen skimped? Rerun!", Color::Red))
-            } else {
-                Block::default().borders(Borders::ALL).title(format!("{} Rooms | WASD/Arrows | R: Rest | T: Retreat | ESC Quit | @ World({},{})", 
-                    game_map.rooms.len(), state.player_x, state.player_y))
-            };
-            let map_widget = Paragraph::new(map_lines).block(title);
-            f.render_widget(map_widget, chunks[0]);
-
-            // Mini-map
-            // --- TRIAL AND ERROR ZONE (Fixed Dimensions) ---
-            let mini_w: i32 = 30; // 
-            let mini_h: i32 = 15; // 
-            let center_offset = mini_w / 2;
-            // --- END TRIAL ZONE ---
-            
-            let mut mini_lines = vec![];
-            for my in 0..mini_h {
-                let mut mini_line = vec![];
-                for mx in 0..mini_w {
-                    let m_x = state.player_x + (mx - center_offset);
-                    let m_y = state.player_y + (my - (mini_h / 2)); // Use mini_h for vertical centering
-                    
-                    let m_ch = if m_x == state.player_x && m_y == state.player_y {
-                        Span::styled("@", Color::Yellow)
-                    } else if zombie_locations.contains_key(&(m_x, m_y)) {
-                        Span::styled("Z", Color::Red)
-                    } else if game_map.in_bounds(m_x, m_y) {
-                        let m_tile = game_map.tiles[game_map.xy_idx(m_x, m_y)];
-                        // Use the static tile type here, but draw moving zombies on main map
-                        match m_tile {
-                            TileType::Wall => Span::styled("#", Color::Gray),
-                            TileType::Floor | TileType::Zombie => Span::styled(".", Color::White), 
-                            TileType::Foliage => Span::styled("~", Color::Green),
-                            TileType::Car => Span::styled("C", Color::DarkGray),
-                            TileType::Resource => Span::styled("$", Color::Yellow),
-                            TileType::Building => Span::styled("B", Color::Blue),
-                            TileType::Mall => Span::styled("M", Color::LightMagenta),
-                            TileType::Weapon => Span::styled("W", Color::Red),
-                            TileType::Note => Span::styled("!", Color::Yellow),
+                    AppMode::Menu => {
+                        match key.code {
+                            KeyCode::Enter => {
+                                // Transition to Game Mode and initialize everything
+                                let (new_map, new_state) = init_game(&mut rng);
+                                game_map = new_map;
+                                state = new_state;
+                                win_condition_met = false;
+                                current_mode = AppMode::Game;
+                            },
+                            KeyCode::Esc => break, 
+                            _ => {}
                         }
-                    } else {
-                        Span::styled(" ", Color::Black)
-                    };
-                    mini_line.push(m_ch);
+                    },
+                    
+                    AppMode::Game => {
+                        let mut turn_taken = false;
+                        
+                        if key.code == KeyCode::Esc { break; } // Quit from game
+                        
+                        let mut action_taken = false;
+                        
+                        if key.code == KeyCode::Char('r') {
+                            if is_near_building(&game_map, state.player_x, state.player_y) {
+                                rest_in_building(&mut state);
+                                action_taken = true;
+                            } else {
+                                state.message_log.push("You can only rest inside or near a Building ('B').".to_string());
+                            }
+                        } 
+                        else if key.code == KeyCode::Char('t') {
+                            handle_retreat_action(&game_map, &mut state, &mut rng);
+                            action_taken = true;
+                            state.move_counter += 1; 
+                        }
+                        else if key.code == KeyCode::Char('j') { 
+                            state.message_log.push("The journal is already visible in the bottom-right panel.".to_string());
+                            action_taken = true;
+                        }
+
+                        let (target_x, target_y) = match key.code {
+                            KeyCode::Up | KeyCode::Char('w') => (state.player_x, state.player_y - 1),
+                            KeyCode::Down | KeyCode::Char('s') => (state.player_x, state.player_y + 1),
+                            KeyCode::Left | KeyCode::Char('a') => (state.player_x - 1, state.player_y),
+                            KeyCode::Right | KeyCode::Char('d') => (state.player_x + 1, state.player_y),
+                            _ => {
+                                if !action_taken { continue; } 
+                                else { (state.player_x, state.player_y) }
+                            }
+                        };
+
+                        if !action_taken {
+                            let old_x = state.player_x;
+                            let old_y = state.player_y;
+                            
+                            handle_tile_interaction(&mut game_map, &mut state, target_x, target_y, &mut rng);
+                            
+                            turn_taken = (state.player_x != old_x || state.player_y != old_y) || 
+                                         (target_x == old_x && target_y == old_y && 
+                                          state.zombies.iter().any(|z| z.x == target_x && z.y == target_y));
+                        } else {
+                            turn_taken = action_taken;
+                        }
+                        
+                        // Check for win condition after interaction (Mall interaction sets health to 0)
+                        if state.health <= 0 && state.notes_collected == 5 && target_x == state.player_x && target_y == state.player_y && game_map.tiles[game_map.xy_idx(target_x, target_y)] == TileType::Mall {
+                            win_condition_met = true;
+                            current_mode = AppMode::GameOver;
+                            continue;
+                        }
+                        
+                        // Check for general death/loss condition
+                        if state.health <= 0 {
+                            win_condition_met = false;
+                            current_mode = AppMode::GameOver;
+                            continue;
+                        }
+                        
+                        // Game Turn Logic
+                        if turn_taken {
+                            spawn_random_zombies(&mut rng, &game_map, &mut state);
+                            update_zombies(&game_map, &mut state);
+
+                            if state.move_counter % 5 == 0 { 
+                                if state.fatigue > 0 { state.fatigue -= 1; }
+                                if state.thirst > 0 { state.thirst -= 1; }
+                            }
+                            if state.move_counter % 10 == 0 {
+                                if state.hunger > 0 { state.hunger -= 1; }
+                            }
+                            
+                            if state.hunger <= 0 || state.thirst <= 0 || state.fatigue <= 0 {
+                                 if state.hunger <= 0 { state.health = state.health.saturating_sub(1); }
+                                 if state.thirst <= 0 { state.health = state.health.saturating_sub(1); }
+                                 if state.fatigue <= 0 { state.health = state.health.saturating_sub(1); }
+
+                                 if state.health <= 0 {
+                                     win_condition_met = false;
+                                     current_mode = AppMode::GameOver;
+                                 }
+                            }
+                        }
+                    },
+                    
+                    AppMode::GameOver => {
+                        match key.code {
+                            KeyCode::Enter => {
+                                // Reset to main menu
+                                current_mode = AppMode::Menu;
+                            },
+                            KeyCode::Esc => break,
+                            _ => {}
+                        }
+                    }
                 }
-                mini_lines.push(Line::from(mini_line));
             }
-            let mini_widget = Paragraph::new(mini_lines).block(Block::default().borders(Borders::ALL).title("Mini-Map (Local)"));
-            f.render_widget(mini_widget, hud_chunks[0]); 
-
-            // Backpack
-            let backpack_items: Vec<Row> = state.inventory.iter().map(|item| {
-                Row::new(vec![Cell::from(Span::styled(item, Style::default().fg(Color::Green)))])
-            }).collect();
-            let backpack_table = Table::new(backpack_items, &[Constraint::Percentage(100)]).block(Block::default().borders(Borders::ALL).title(format!("Backpack ({} Ammo)", state.ammo)));
-            f.render_widget(backpack_table, hud_chunks[1]);
-
-            // Moodles
-            let moodle_lines = vec![
-                Line::from(vec![
-                    Span::styled("HP:", Color::Red),
-                    Span::styled(format!("{:3}", state.health.max(0)), Style::default().fg(if state.health < 25 { Color::Red } else if state.health < 75 { Color::Yellow } else { Color::Green })),
-                ]),
-                Line::from(vec![
-                    Span::styled("Hunger:", Color::White),
-                    Span::styled(format!("{:3}", state.hunger.max(0)), Style::default().fg(if state.hunger < 25 { Color::Red } else if state.hunger < 75 { Color::Yellow } else { Color::Green })),
-                ]),
-                Line::from(vec![
-                    Span::styled("Thirst:", Color::White),
-                    Span::styled(format!("{:3}", state.thirst.max(0)), Style::default().fg(if state.thirst < 25 { Color::Red } else if state.thirst < 75 { Color::Yellow } else { Color::Green })),
-                ]),
-                Line::from(vec![
-                    Span::styled("Fatigue:", Color::White),
-                    Span::styled(format!("{:3}", state.fatigue.max(0)), Style::default().fg(if state.fatigue < 25 { Color::Red } else if state.fatigue < 77 { Color::Yellow } else { Color::Green })),
-                ]),
-            ];
-            let moodle_widget = Paragraph::new(moodle_lines).block(Block::default().borders(Borders::ALL).title("Moodles"));
-            f.render_widget(moodle_widget, hud_chunks[2]);
-
-            // Dialogues/Journal
-            let log_chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Percentage(70), // Journal (takes most of the space)
-                    Constraint::Percentage(30), // Radio/Log (takes latest messages)
-                ].as_ref())
-                .split(hud_chunks[3]);
-
-            // JOURNAL (Permanent Notes) - FIX APPLIED HERE
-            let journal_lines: Vec<Line<'_>> = state.journal
-                .iter()
-                .enumerate()
-                // Format the message with its correct index (1-based) and style
-                .map(|(i, msg)| {
-                    // Using i + 1 for the 1-based index
-                    let prefixed_msg = format!("- Note {}: {}", i + 1, msg.as_str()); 
-                    Line::from(Span::styled(prefixed_msg, Color::LightGreen))
-                })
-                .collect();
-            
-            // The journal lines are now in the correct chronological order (1, 2, 3...)
-            let mut display_journal_lines = journal_lines;
-
-            // Pad the journal lines with empty lines at the top to push content down
-            let available_height = log_chunks[0].height as usize;
-            
-            if display_journal_lines.len() < available_height {
-                let padding_needed = available_height - display_journal_lines.len();
-                for _ in 0..padding_needed {
-                    display_journal_lines.insert(0, Line::from(""));
-                }
-            } else if display_journal_lines.len() > available_height {
-                // If the journal is too tall, trim the oldest (top) entries
-                let start_index = display_journal_lines.len() - available_height;
-                display_journal_lines = display_journal_lines.into_iter().skip(start_index).collect();
-            }
-
-            let journal_widget = Paragraph::new(display_journal_lines).block(Block::default().borders(Borders::ALL).title(format!("Journal ({}/5)", state.notes_collected)));
-            f.render_widget(journal_widget, log_chunks[0]);
-
-            // DIALOGUES (Transient Messages)
-            let max_lines = log_chunks[1].height as usize - 2; 
-            let msg_lines: Vec<Line<'_>> = state.message_log
-                .iter()
-                .rev()
-                .take(max_lines)
-                .map(|msg| Line::from(Span::styled(msg.as_str(), Color::Cyan)))
-                .collect();
-            let mut final_lines = msg_lines.into_iter().rev().collect::<Vec<_>>();
-
-            while final_lines.len() < max_lines {
-                final_lines.insert(0, Line::from(""));
-            }
-
-            let dialogue_widget = Paragraph::new(final_lines).block(Block::default().borders(Borders::ALL).title("Radio/Log"));
-            f.render_widget(dialogue_widget, log_chunks[1]);
-        })?;
-
-        // Check death one final time before breaking
-        if state.health <= 0 {
-            break;
         }
     }
 
@@ -1233,6 +1291,6 @@ fn main() -> Result<()> {
     )?;
     terminal.show_cursor()?;
 
-    println!("\nGame Over. {} rooms explored. Final pos: ({},{})", game_map.rooms.len(), state.player_x, state.player_y);
+    println!("\nProject Concluded. Final Mode: {:?}", current_mode);
     Ok(())
 }
