@@ -5,8 +5,9 @@ Yo, squad—welcome to Rust Zomboid Terminal, the terminal-based roguelike where
 # 🎮 Quick Start: From Cargo.toml to Cul-de-Sac Carnage
 
 Clone, build, run—faster than a sprinter on caffeine
-
-' git clone https://github.com/xXNannu09Xx/ZomboidMania.git
+```rust
+git clone https://github.com/xXNannu09Xx/ZomboidMania.git
 cd ZomboidMania
 cargo build
-cargo run '
+cargo run 
+```
