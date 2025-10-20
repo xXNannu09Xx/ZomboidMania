@@ -11,3 +11,5 @@ cd ZomboidMania
 cargo build
 cargo run 
 ```
+
+This is vibe coded but it made me love rust. more organic projects coming soon [^1]
