@@ -42,6 +42,7 @@ pub enum TileType {
     Building,
     Mall,
     Weapon, 
+    Note, // <--- ADDED: Collectible notes
 }
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
@@ -226,7 +227,7 @@ impl Map {
             }
         }
         
-        // --- Static Population & Feature Generation ---
+        // --- Static Population & Feature Generation (Modified) ---
         let first_room_rect = self.rooms.first().copied();
 
         for y in 0..self.height as i32 {
@@ -258,19 +259,37 @@ impl Map {
             }
         }
 
-        // Apply Mall *ONLY* to the last room.
+        // --- Note Placement Logic (5 Notes) ---
+        let mut notes_placed = 0;
+        while notes_placed < 5 {
+            let x = rng.gen_range(1..self.width as i32 - 1);
+            let y = rng.gen_range(1..self.height as i32 - 1);
+            let idx = self.xy_idx(x, y);
+
+            // Ensure placement is on an empty floor tile (or inside a feature that isn't Wall/Mall)
+            if self.tiles[idx] == TileType::Floor {
+                self.tiles[idx] = TileType::Note;
+                notes_placed += 1;
+            }
+        }
+
+        // 2. Disable Mall at start (it will be placed when notes_collected reaches 5)
         if self.rooms.len() > 1 {
             if let Some(last_room) = self.rooms.last() {
                 for y in last_room.y1..=last_room.y2 {
                     for x in last_room.x1..=last_room.x2 {
                         if self.in_bounds(x, y) {
                             let idx = self.xy_idx(x, y);
-                            self.tiles[idx] = TileType::Mall;
+                            // Ensure the final room starts as a safe, empty floor or existing features
+                            if self.tiles[idx] != TileType::Wall {
+                                self.tiles[idx] = TileType::Floor;
+                            }
                         }
                     }
                 }
             }
         }
+        // End of generate_bsp
     }
 
     pub fn compute_fov(&self, px: i32, py: i32, radius: i32) -> HashMap<(i32, i32), Shade> {
@@ -315,6 +334,9 @@ struct GameState {
     inventory: Vec<String>,
     message_log: Vec<String>,
     zombies: Vec<Zombie>, // ADDED: List of all active zombies
+    move_counter: u32, // <--- ADDED: Counter for managing moodle decay
+    notes_collected: u32, // <--- ADDED: Note collection counter
+    journal: Vec<String>, // <--- NEW: Permanent storage for note content
 }
 
 impl GameState {
@@ -325,11 +347,17 @@ impl GameState {
             health: 100,
             thirst: 100,
             hunger: 100,
-            fatigue: 100,
+            fatigue: 300,
             ammo: 10,
             inventory: vec!["rusty knife".to_string()],
-            message_log: vec!["Radio crackles: 'Help, the horde's at the mall!'".to_string()],
+            message_log: vec![
+                "Radio crackles: 'Help, the horde's at the mall!'".to_string(),
+                "Tip: Press 'T' to throw an item and distract an adjacent zombie.".to_string(), // <--- NEW PROMPT
+            ],
             zombies: vec![],
+            move_counter: 0, // <--- INITIALIZED
+            notes_collected: 0, // <--- INITIALIZED
+            journal: vec![], // <--- INITIALIZED
         }
     }
 }
@@ -437,7 +465,8 @@ fn spawn_random_zombies(
 
 // NEW FUNCTION: Tactical Retreat
 fn handle_retreat_action(map: &Map, state: &mut GameState, rng: &mut ThreadRng) {
-    state.fatigue = state.fatigue.saturating_sub(5); // Fatigue cost for the action
+    // Stat drain for this action is still immediate and higher
+    state.fatigue = state.fatigue.saturating_sub(5); 
     state.hunger = state.hunger.saturating_sub(1);
     state.thirst = state.thirst.saturating_sub(1);
 
@@ -550,6 +579,18 @@ fn update_zombies(
     }
     
     while state.message_log.len() > 10 { state.message_log.remove(0); }
+}
+
+// NEW FUNCTION: Note Content
+fn get_note_content(note_id: u32) -> &'static str {
+    match note_id {
+        1 => "Note 1: 'They followed the sirens. The radio tower signal is strongest near the old shopping center. That's the only way out.'",
+        2 => "Note 2: 'Water's gone. Hunger is a sharper edge than any zombie tooth. We need supplies, but the mall is key.'",
+        3 => "Note 3: 'K. was taken. I saw the horde sweep through the tunnels. We must bypass them and find the final beacon.'",
+        4 => "Note 4: 'The safe haven isn't the mall itself—it's the roof. There's a chopper arriving once the signal is fully secured.'",
+        5 => "Note 5: 'Five parts to the signal. Find all five and the rescue frequency will be open. Don't stop. Don't look back.'",
+        _ => "A blank piece of paper. Nothing here.",
+    }
 }
 
 // --- Interaction Handlers ---
@@ -674,6 +715,43 @@ fn handle_tile_interaction(map: &mut Map, state: &mut GameState, x: i32, y: i32,
             map.tiles[idx] = TileType::Floor;
             moved = true;
         }
+        TileType::Note => { // <--- NEW INTERACTION LOGIC
+            // Only collect up to 5 notes
+            if state.notes_collected < 5 {
+                state.notes_collected = state.notes_collected.saturating_add(1);
+            }
+            let note_id = state.notes_collected; 
+            let content = get_note_content(note_id);
+            
+            // Add note content to the permanent Journal
+            state.journal.push(content.to_string());
+
+            // Add simple discovery alert to the transient message log
+            state.message_log.push(format!("(J) Found Note #{}: {}/5 collected.", note_id, state.notes_collected));
+            
+            // Critical: Check for endgame condition
+            if state.notes_collected == 5 {
+                state.message_log.push(">>> RESCUE SIGNAL SECURED! The Mall is now the objective. <<<".to_string());
+                
+                // Immediately spawn the Mall location in the last room
+                if let Some(last_room) = map.rooms.last() {
+                    for y in last_room.y1..=last_room.y2 {
+                        for x in last_room.x1..=last_room.x2 {
+                            if map.in_bounds(x, y) {
+                                let mall_idx = map.xy_idx(x, y);
+                                // Convert floor/feature tiles to Mall
+                                if map.tiles[mall_idx] != TileType::Wall {
+                                    map.tiles[mall_idx] = TileType::Mall;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            
+            map.tiles[idx] = TileType::Floor;
+            moved = true;
+        }
         TileType::Mall => {
             state.message_log.push("You reached the Mall! The final challenge awaits...".to_string());
             moved = true;
@@ -690,6 +768,7 @@ fn handle_tile_interaction(map: &mut Map, state: &mut GameState, x: i32, y: i32,
         state.player_x = x;
         state.player_y = y;
         state.fatigue = state.fatigue.saturating_sub(1);
+        state.move_counter += 1; // <--- INCREMENT MOVE COUNTER
     }
     
     while state.message_log.len() > 10 { state.message_log.remove(0); }
@@ -707,8 +786,8 @@ fn main() -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let mut rng = rand::thread_rng();
-    let map_width = 80;
-    let map_height = 50;
+    let map_width = 160; // FIX: Increased map width
+    let map_height = 47;  // FIX: Increased map height
     let mut game_map = Map::new(map_width, map_height);
     game_map.generate_bsp(&mut rng);
 
@@ -777,12 +856,15 @@ fn main() -> Result<()> {
                 if key.code == KeyCode::Esc {
                     break;
                 }
-
+                
+                // --- Action Keys ---
+                let mut action_taken = false;
+                
                 // Check for the REST action
                 if key.code == KeyCode::Char('r') {
                     if is_near_building(&game_map, state.player_x, state.player_y) {
                         rest_in_building(&mut state);
-                        turn_taken = true;
+                        action_taken = true;
                     } else {
                         state.message_log.push("You can only rest inside or near a Building ('B').".to_string());
                     }
@@ -790,7 +872,13 @@ fn main() -> Result<()> {
                 // NEW: Check for the RETREAT action
                 else if key.code == KeyCode::Char('t') {
                     handle_retreat_action(&game_map, &mut state, &mut rng);
-                    turn_taken = true;
+                    action_taken = true;
+                    state.move_counter += 1; // Retreat counts as a move for decay purposes
+                }
+                // ADDED: J key does nothing but consume the turn
+                else if key.code == KeyCode::Char('j') { 
+                    state.message_log.push("The journal is already visible in the bottom-right panel.".to_string());
+                    action_taken = true;
                 }
 
                 // Movement/Interaction logic
@@ -800,14 +888,23 @@ fn main() -> Result<()> {
                     KeyCode::Left | KeyCode::Char('a') => (state.player_x - 1, state.player_y),
                     KeyCode::Right | KeyCode::Char('d') => (state.player_x + 1, state.player_y),
                     _ => {
-                        if !turn_taken { continue; } 
+                        if !action_taken { continue; } 
                         else { (state.player_x, state.player_y) }
                     }
                 };
 
-                if !turn_taken {
+                if !action_taken {
+                    let old_x = state.player_x;
+                    let old_y = state.player_y;
+                    
                     handle_tile_interaction(&mut game_map, &mut state, target_x, target_y, &mut rng);
-                    turn_taken = true;
+                    
+                    // Check if a move or turn-consuming interaction occurred.
+                    turn_taken = (state.player_x != old_x || state.player_y != old_y) || 
+                                 (target_x == old_x && target_y == old_y && 
+                                  state.zombies.iter().any(|z| z.x == target_x && z.y == target_y));
+                } else {
+                    turn_taken = action_taken;
                 }
             }
         }
@@ -819,11 +916,23 @@ fn main() -> Result<()> {
             update_zombies(&game_map, &mut state);
             // === ZOMBIE TURN END ===
 
-            // Game turn logic (passive state decay)
-            if state.hunger > 0 { state.hunger -= 1; }
-            if state.thirst > 0 { state.thirst -= 1; }
-            if state.fatigue > 0 { state.fatigue -= 1; }
-
+            // Game turn logic (passive state decay based on counters)
+            
+            // Fatigue decay: every 5 moves (ADJUSTED)
+            if state.move_counter % 5 == 0 { 
+                if state.fatigue > 0 { state.fatigue -= 1; }
+            }
+            
+            // Thirst decay: every 5 moves (REMAINS THE SAME)
+            if state.move_counter % 5 == 0 {
+                if state.thirst > 0 { state.thirst -= 1; }
+            }
+            
+            // Hunger decay: every 10 moves (REMAINS THE SAME)
+            if state.move_counter % 10 == 0 {
+                if state.hunger > 0 { state.hunger -= 1; }
+            }
+            
             // Check for negative stats and apply damage/game over logic
             if state.hunger <= 0 || state.thirst <= 0 || state.fatigue <= 0 {
                  if state.hunger <= 0 { state.health = state.health.saturating_sub(1); }
@@ -845,10 +954,22 @@ fn main() -> Result<()> {
                 .direction(Direction::Horizontal)
                 .margin(1)
                 .constraints([
-                    Constraint::Percentage(70),
-                    Constraint::Percentage(30),
+                    Constraint::Percentage(80), // Map area
+                    Constraint::Percentage(20), // HUD area
                 ].as_ref())
                 .split(f.area());
+
+            // Define hud_chunks here before it's used
+            let hud_chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .margin(0)
+                .constraints([
+                    Constraint::Percentage(30), // Minimap (expanded)
+                    Constraint::Percentage(20), // Backpack
+                    Constraint::Percentage(25), // Moodles
+                    Constraint::Percentage(25), // Dialogues/Journal (bottom area)
+                ].as_ref())
+                .split(chunks[1]);
 
             let map_area = chunks[0];
             let render_w = map_area.width as i32;
@@ -946,6 +1067,11 @@ fn main() -> Result<()> {
                             (TileType::Weapon, Shade::Lit) => ('W', Color::Red),
                             (TileType::Weapon, Shade::Bright) => ('W', Color::LightRed),
                             
+                            (TileType::Note, Shade::Dark) => (' ', Color::Black),
+                            (TileType::Note, Shade::Dim) => ('!', Color::Yellow),
+                            (TileType::Note, Shade::Lit) => ('!', Color::LightYellow),
+                            (TileType::Note, Shade::Bright) => ('!', Color::White),
+                            
                             (TileType::Zombie, _) => ('Z', Color::Black), // Static zombie tile is now drawn as a placeholder
                         };
                         Span::styled(ch.to_string(), Style::default().fg(col))
@@ -964,26 +1090,19 @@ fn main() -> Result<()> {
             let map_widget = Paragraph::new(map_lines).block(title);
             f.render_widget(map_widget, chunks[0]);
 
-            let hud_chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .margin(0)
-                .constraints([
-                    Constraint::Percentage(20),
-                    Constraint::Percentage(20),
-                    Constraint::Percentage(20),
-                    Constraint::Percentage(40),
-                ].as_ref())
-                .split(chunks[1]);
-
             // Mini-map
-            let mini_w = 10;
-            let mini_h = 10;
+            // --- TRIAL AND ERROR ZONE (Fixed Dimensions) ---
+            let mini_w: i32 = 30; // 
+            let mini_h: i32 = 15; // 
+            let center_offset = mini_w / 2;
+            // --- END TRIAL ZONE ---
+            
             let mut mini_lines = vec![];
             for my in 0..mini_h {
                 let mut mini_line = vec![];
                 for mx in 0..mini_w {
-                    let m_x = state.player_x + (mx as i32 - 5);
-                    let m_y = state.player_y + (my as i32 - 5);
+                    let m_x = state.player_x + (mx - center_offset);
+                    let m_y = state.player_y + (my - (mini_h / 2)); // Use mini_h for vertical centering
                     
                     let m_ch = if m_x == state.player_x && m_y == state.player_y {
                         Span::styled("@", Color::Yellow)
@@ -1001,6 +1120,7 @@ fn main() -> Result<()> {
                             TileType::Building => Span::styled("B", Color::Blue),
                             TileType::Mall => Span::styled("M", Color::LightMagenta),
                             TileType::Weapon => Span::styled("W", Color::Red),
+                            TileType::Note => Span::styled("!", Color::Yellow),
                         }
                     } else {
                         Span::styled(" ", Color::Black)
@@ -1010,7 +1130,7 @@ fn main() -> Result<()> {
                 mini_lines.push(Line::from(mini_line));
             }
             let mini_widget = Paragraph::new(mini_lines).block(Block::default().borders(Borders::ALL).title("Mini-Map (Local)"));
-            f.render_widget(mini_widget, hud_chunks[0]);
+            f.render_widget(mini_widget, hud_chunks[0]); 
 
             // Backpack
             let backpack_items: Vec<Row> = state.inventory.iter().map(|item| {
@@ -1035,14 +1155,55 @@ fn main() -> Result<()> {
                 ]),
                 Line::from(vec![
                     Span::styled("Fatigue:", Color::White),
-                    Span::styled(format!("{:3}", state.fatigue.max(0)), Style::default().fg(if state.fatigue < 25 { Color::Red } else if state.fatigue < 75 { Color::Yellow } else { Color::Green })),
+                    Span::styled(format!("{:3}", state.fatigue.max(0)), Style::default().fg(if state.fatigue < 25 { Color::Red } else if state.fatigue < 77 { Color::Yellow } else { Color::Green })),
                 ]),
             ];
             let moodle_widget = Paragraph::new(moodle_lines).block(Block::default().borders(Borders::ALL).title("Moodles"));
             f.render_widget(moodle_widget, hud_chunks[2]);
 
-            // Dialogues
-            let max_lines = hud_chunks[3].height as usize - 2; 
+            // Dialogues/Journal
+            let log_chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Percentage(70), // Journal (takes most of the space)
+                    Constraint::Percentage(30), // Radio/Log (takes latest messages)
+                ].as_ref())
+                .split(hud_chunks[3]);
+
+            // JOURNAL (Permanent Notes) - FIX APPLIED HERE
+            let journal_lines: Vec<Line<'_>> = state.journal
+                .iter()
+                .enumerate()
+                // Format the message with its correct index (1-based) and style
+                .map(|(i, msg)| {
+                    // Using i + 1 for the 1-based index
+                    let prefixed_msg = format!("- Note {}: {}", i + 1, msg.as_str()); 
+                    Line::from(Span::styled(prefixed_msg, Color::LightGreen))
+                })
+                .collect();
+            
+            // The journal lines are now in the correct chronological order (1, 2, 3...)
+            let mut display_journal_lines = journal_lines;
+
+            // Pad the journal lines with empty lines at the top to push content down
+            let available_height = log_chunks[0].height as usize;
+            
+            if display_journal_lines.len() < available_height {
+                let padding_needed = available_height - display_journal_lines.len();
+                for _ in 0..padding_needed {
+                    display_journal_lines.insert(0, Line::from(""));
+                }
+            } else if display_journal_lines.len() > available_height {
+                // If the journal is too tall, trim the oldest (top) entries
+                let start_index = display_journal_lines.len() - available_height;
+                display_journal_lines = display_journal_lines.into_iter().skip(start_index).collect();
+            }
+
+            let journal_widget = Paragraph::new(display_journal_lines).block(Block::default().borders(Borders::ALL).title(format!("Journal ({}/5)", state.notes_collected)));
+            f.render_widget(journal_widget, log_chunks[0]);
+
+            // DIALOGUES (Transient Messages)
+            let max_lines = log_chunks[1].height as usize - 2; 
             let msg_lines: Vec<Line<'_>> = state.message_log
                 .iter()
                 .rev()
@@ -1056,7 +1217,7 @@ fn main() -> Result<()> {
             }
 
             let dialogue_widget = Paragraph::new(final_lines).block(Block::default().borders(Borders::ALL).title("Radio/Log"));
-            f.render_widget(dialogue_widget, hud_chunks[3]);
+            f.render_widget(dialogue_widget, log_chunks[1]);
         })?;
 
         // Check death one final time before breaking
