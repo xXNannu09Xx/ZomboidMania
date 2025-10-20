@@ -7,7 +7,7 @@ Yo, squad—welcome to Rust Zomboid Terminal, the terminal-based roguelike where
 Clone, build, run—faster than a sprinter on caffeine
 ```rust
 git clone https://github.com/xXNannu09Xx/ZomboidMania.git
-cd ZomboidMania
+cd ZomboidMania/dc
 cargo build
 cargo run 
 ```
