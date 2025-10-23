@@ -12,4 +12,4 @@ cargo build
 cargo run 
 ```
 
-This is vibe coded but it made me love rust. more organic projects coming soon.
+I loved using rust and more rust projects coming soon
